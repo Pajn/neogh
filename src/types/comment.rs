@@ -38,33 +38,60 @@ pub enum Comment {
     Issue(IssueComment),
 }
 
-impl Comment {
-    pub fn author(&self) -> &str {
+/// Trait for common comment operations
+pub trait CommentExt {
+    fn author(&self) -> &str;
+    fn body(&self) -> &str;
+    fn created_at(&self) -> &DateTime<Utc>;
+    fn location(&self) -> Option<(&str, u32)>;
+    
+    /// Number of lines this comment takes when rendered.
+    /// Matches CommentBuffer::render_comment_lines:
+    /// - separator (1)
+    /// - header (1)
+    /// - author/time (1)
+    /// - sub_separator (1)
+    /// - body lines (N, minimum 1)
+    /// - separator (1)
+    /// Total: 5 + body_lines
+    fn height(&self) -> usize {
+        let body_lines = self.body().lines().count().max(1);
+        5 + body_lines
+    }
+}
+
+impl CommentExt for Comment {
+    fn author(&self) -> &str {
         match self {
             Comment::Review(c) => &c.user.login,
             Comment::Issue(c) => &c.user.login,
         }
     }
 
-    pub fn body(&self) -> &str {
+    fn body(&self) -> &str {
         match self {
             Comment::Review(c) => &c.body,
             Comment::Issue(c) => &c.body,
         }
     }
 
-    pub fn created_at(&self) -> &DateTime<Utc> {
+    fn created_at(&self) -> &DateTime<Utc> {
         match self {
             Comment::Review(c) => &c.created_at,
             Comment::Issue(c) => &c.created_at,
         }
     }
 
-    /// Returns (path, line) for review comments, None for issue comments
-    pub fn location(&self) -> Option<(&str, u32)> {
+    fn location(&self) -> Option<(&str, u32)> {
         match self {
             Comment::Review(c) => c.line.map(|l| (c.path.as_str(), l)),
             Comment::Issue(_) => None,
         }
+    }
+}
+
+impl Comment {
+    pub fn height(&self) -> usize {
+        CommentExt::height(self)
     }
 }

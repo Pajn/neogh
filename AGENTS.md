@@ -100,6 +100,38 @@ Safety & commit rules
 - Workers should NOT commit or push changes unless explicitly requested by the user.
 - When a commit is requested, follow the Git Safety Protocol: do not amend commits or force push without explicit user approval.
 
+Technical Discoveries
+---------------------
+### FFI Panic Handling
+- nvim-oxi plugin functions are `extern "C"` and cannot unwind
+- Any panic crossing this FFI boundary causes "panic in a function that cannot unwind" error
+- **Fix**: Wrap all Lua function exports and autocmd callbacks with `std::panic::catch_unwind`
+
+### RefCell Re-entrancy
+- Autocmd callbacks (e.g., cursor tracking) can fire while holding a `RefCell` borrow
+- This causes `borrow_mut()` to panic with "already borrowed" error
+- **Fix**: Use `try_borrow_mut()` instead and handle the `Err` case gracefully
+
+### Line Number Indexing
+- Neovim's `get_cursor()` returns 0-based line numbers
+- All line indexing in the codebase must be 0-based for consistency
+- This includes `line_map` in `CommentBuffer` and all navigation calculations
+- **Rule**: Use 0-based indexing throughout; only convert to 1-based when displaying to user
+
+### Comment Height Calculation
+- The `render_comment_lines` function produces exactly `5 + body_lines` lines:
+  - separator (1) + header (1) + author (1) + sub_sep (1) + body[N] + separator (1)
+- The `CommentExt::height()` method must return this same value
+- **Critical**: Navigator and CommentBuffer must use the same height calculation for proper navigation sync
+
+### GitHub API Integration
+- `gh pr view --json` does NOT include a `baseRepository` field
+- Owner/repo must be extracted from the PR URL instead
+- PR comments are stored on the base repo, not the fork's `headRepository`
+- **Pagination**: Use `result.next.is_none()` to check for more pages with octocrab
+- **Review Comments**: Include ALL review comments, not just those with `pull_request_review_id`
+- **Null Lines**: Use `original_line` as fallback when `line` is null in review comments
+
 Concluding notes
 ----------------
 This AGENTS.md is a living document. Update it if the repository structure changes (new directories, tests added, CI introduced), or if the team adopts new tooling (unit test frameworks, CI pipelines). The Commander ensures .opencode/context.md is kept up to date with the project's observed facts.

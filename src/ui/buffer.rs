@@ -1,8 +1,11 @@
-use crate::types::Comment;
+use crate::types::{Comment, CommentExt};
 use chrono::{DateTime, Utc};
 
+/// Renders comments to lines and tracks line->comment mapping.
+/// Uses 0-based line numbers to match get_cursor() behavior.
 pub struct CommentBuffer {
     comments: Vec<Comment>,
+    /// (start_line, end_line, comment_index) - all 0-based
     line_map: Vec<(usize, usize, usize)>,
 }
 
@@ -18,10 +21,7 @@ impl CommentBuffer {
         &self.comments
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.comments.is_empty()
-    }
-
+    /// Convert cursor line (0-based) to comment index
     pub fn line_to_comment_index(&self, line: usize) -> Option<usize> {
         for &(start, end, idx) in &self.line_map {
             if line >= start && line < end {
@@ -29,13 +29,6 @@ impl CommentBuffer {
             }
         }
         None
-    }
-
-    pub fn get_line_for_comment(&self, index: usize) -> Option<usize> {
-        self.line_map
-            .iter()
-            .find(|&&(_, _, idx)| idx == index)
-            .map(|&(start, _, _)| start)
     }
 
     fn format_relative_time(dt: &DateTime<Utc>) -> String {
@@ -83,8 +76,10 @@ impl CommentBuffer {
         let separator = "━".repeat(47);
         let sub_separator = "─".repeat(47);
 
+        // 1. Top separator
         lines.push(separator.clone());
 
+        // 2. Header
         let header = match comment {
             Comment::Review(rc) => {
                 if let Some(line_num) = rc.line {
@@ -97,15 +92,24 @@ impl CommentBuffer {
         };
         lines.push(header);
 
+        // 3. Author and time
         let time_str = Self::format_relative_time(comment.created_at());
         lines.push(format!("@{} • {}", comment.author(), time_str));
 
+        // 4. Sub-separator
         lines.push(sub_separator);
 
-        for body_line in comment.body().lines() {
-            lines.push(body_line.to_string());
+        // 5+. Body lines (at least 1 to match height() calculation)
+        let body_lines: Vec<&str> = comment.body().lines().collect();
+        if body_lines.is_empty() {
+            lines.push(String::new());
+        } else {
+            for body_line in body_lines {
+                lines.push(body_line.to_string());
+            }
         }
 
+        // Final separator
         lines.push(separator);
 
         lines
@@ -125,12 +129,12 @@ impl CommentBuffer {
         }
 
         let mut all_lines = Vec::new();
-        let mut current_line = 0;
+        let mut current_line: usize = 0;
 
         for (index, comment) in self.comments.iter().enumerate() {
             let comment_lines = Self::render_comment_lines(comment);
             let start_line = current_line;
-            let end_line = current_line + comment_lines.len();
+            let end_line = start_line + comment_lines.len();
 
             self.line_map.push((start_line, end_line, index));
 

@@ -1,6 +1,6 @@
 //! Sidebar window management
 
-use nvim_oxi::api::{self, opts::OptionOpts, types::*, Buffer, Window};
+use nvim_oxi::api::{self, opts::OptionOpts, Buffer, Window};
 
 pub struct Sidebar {
     win: Option<Window>,
@@ -45,6 +45,7 @@ impl Sidebar {
 
         self.previous_win = Some(Window::current());
 
+        // Create a new buffer
         let mut buf = api::create_buf(true, false)?;
 
         buf.set_lines(
@@ -68,23 +69,22 @@ impl Sidebar {
             false,
             &OptionOpts::builder().buffer(buf.clone()).build(),
         )?;
+        api::set_option_value(
+            "filetype",
+            "neogh",
+            &OptionOpts::builder().buffer(buf.clone()).build(),
+        )?;
 
-        let width: u32 = 45;
-        let editor_width: u32 = api::get_option_value("columns", &OptionOpts::default())?;
-        let height: u32 = api::get_option_value("lines", &OptionOpts::default())?;
+        // Open vertical split on the right side
+        api::command("botright vsplit")?;
 
-        let config = WindowConfig::builder()
-            .relative(WindowRelativeTo::Editor)
-            .row(0f64)
-            .col(editor_width as f64)
-            .width(width)
-            .height(height.saturating_sub(1))
-            .anchor(WindowAnchor::NorthEast)
-            .style(WindowStyle::Minimal)
-            .build();
+        // The new window becomes current
+        let win = Window::current();
 
-        let win = api::open_win(&buf, false, &config)?;
+        // Set the buffer in the new window
+        api::set_current_buf(&buf)?;
 
+        // Set window options
         api::set_option_value(
             "number",
             false,
@@ -100,6 +100,14 @@ impl Sidebar {
             "no",
             &OptionOpts::builder().win(win.clone()).build(),
         )?;
+        api::set_option_value(
+            "cursorline",
+            true,
+            &OptionOpts::builder().win(win.clone()).build(),
+        )?;
+
+        // Set window width
+        api::command("vertical resize 50")?;
 
         self.buf = Some(buf);
         self.win = Some(win);
@@ -120,7 +128,9 @@ impl Sidebar {
     pub fn close(&mut self) -> Result<(), api::Error> {
         if let Some(win) = self.win.take() {
             if win.is_valid() {
-                win.close(true)?;
+                // Close the window
+                api::set_current_win(&win)?;
+                api::command("close")?;
             }
         }
         self.buf = None;

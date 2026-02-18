@@ -1,3 +1,3 @@
 pub mod comment;
 
-pub use comment::{Comment, IssueComment, ReviewComment, User};
+pub use comment::{Comment, CommentExt, IssueComment, ReviewComment, User};
