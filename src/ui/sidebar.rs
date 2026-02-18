@@ -74,6 +74,11 @@ impl Sidebar {
             "neogh",
             &OptionOpts::builder().buffer(buf.clone()).build(),
         )?;
+        api::set_option_value(
+            "modifiable",
+            false,
+            &OptionOpts::builder().buffer(buf.clone()).build(),
+        )?;
 
         // Open vertical split on the right side
         api::command("botright vsplit")?;
@@ -116,10 +121,22 @@ impl Sidebar {
 
     pub fn set_lines(&mut self, lines: Vec<String>) -> Result<(), api::Error> {
         if let Some(ref mut buf) = self.buf {
+            api::set_option_value(
+                "modifiable",
+                true,
+                &OptionOpts::builder().buffer(buf.clone()).build(),
+            )?;
+
             buf.set_lines(
                 ..,
                 false,
                 lines.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )?;
+
+            api::set_option_value(
+                "modifiable",
+                false,
+                &OptionOpts::builder().buffer(buf.clone()).build(),
             )?;
         }
         Ok(())

@@ -32,6 +32,57 @@ pub struct PullRequest {
     pub repo: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub number: u64,
+    pub title: String,
+    pub head_ref: String,
+    pub base_ref: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrChain {
+    pub chain: Vec<PrInfo>,
+    pub current_index: usize,
+}
+
+impl PrChain {
+    pub fn current(&self) -> Option<&PrInfo> {
+        self.chain.get(self.current_index)
+    }
+
+    pub fn parent(&self) -> Option<&PrInfo> {
+        if self.current_index == 0 {
+            None
+        } else {
+            self.chain.get(self.current_index - 1)
+        }
+    }
+
+    pub fn child(&self) -> Option<&PrInfo> {
+        self.chain.get(self.current_index + 1)
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.current_index == 0
+    }
+
+    pub fn is_tip(&self) -> bool {
+        self.current_index == self.chain.len().saturating_sub(1)
+    }
+}
+
+impl From<PullRequest> for PrInfo {
+    fn from(pr: PullRequest) -> Self {
+        PrInfo {
+            number: pr.number,
+            title: pr.title,
+            head_ref: pr.head_ref,
+            base_ref: pr.base_ref,
+        }
+    }
+}
+
 pub fn detect_pr() -> Result<PullRequest, PrError> {
     let output = Command::new("gh")
         .args([
@@ -57,11 +108,11 @@ pub fn detect_pr() -> Result<PullRequest, PrError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let response: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|e| PrError::ParseError(e.to_string()))?;
+    let response: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| PrError::ParseError(e.to_string()))?;
 
     let url = response["url"].as_str().unwrap_or("");
-    
+
     // Parse owner/repo from URL: https://github.com/owner/repo/pull/123
     let parts: Vec<&str> = url.trim_end_matches('/').split('/').collect();
     let (owner, repo) = if parts.len() >= 5 && parts[2] == "github.com" {

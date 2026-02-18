@@ -2,13 +2,32 @@ mod github;
 mod types;
 mod ui;
 
-use crate::github::{detect_pr, fetch_comments, get_gh_token, is_gh_installed, AuthError, PrError};
-use crate::types::{Comment, CommentExt};
+use crate::github::{
+    detect_chain, detect_pr, fetch_comments, get_gh_token, is_gh_installed, resolve_thread,
+    unresolve_thread, AuthError, PrError,
+};
+use crate::github::pr::{PrChain, PullRequest};
+use crate::types::{Comment, CommentExt, CommentThread};
 use crate::ui::{CommentBuffer, Navigator, Sidebar};
 use nvim_oxi::api::{self, opts::*, types::*, Buffer, Window};
+use nvim_oxi::libuv::AsyncHandle;
 use nvim_oxi::{Dictionary, Function, Object};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
+
+enum FetchResult {
+    Success {
+        threads: Vec<CommentThread>,
+        title: String,
+        number: u64,
+        current_pr: PullRequest,
+        pr_chain: Option<PrChain>,
+    },
+    Error(String),
+}
 
 thread_local! {
     static STATE: RefCell<Option<PluginState>> = RefCell::new(None);
@@ -16,21 +35,56 @@ thread_local! {
 
 struct PluginState {
     sidebar: Sidebar,
-    comments: Vec<Comment>,
+    threads: Vec<CommentThread>,
     navigator: Navigator,
     buffer: CommentBuffer,
+    collapsed: HashSet<usize>,
+    is_loading: bool,
+    async_handle: Option<AsyncHandle>,
+    current_pr: Option<PullRequest>,
+    pr_chain: Option<PrChain>,
 }
 
 impl PluginState {
-    fn new(comments: Vec<Comment>) -> Self {
-        let buffer = CommentBuffer::new(comments.clone());
-        let navigator = Navigator::new(comments.clone());
+    fn new(threads: Vec<CommentThread>) -> Self {
+        let mut buffer = CommentBuffer::new(threads.clone());
+        buffer.initialize_collapsed();
+        let navigator = Navigator::new(threads.clone());
         Self {
             sidebar: Sidebar::new(),
-            comments,
+            threads,
             navigator,
             buffer,
+            collapsed: HashSet::new(),
+            is_loading: false,
+            async_handle: None,
+            current_pr: None,
+            pr_chain: None,
         }
+    }
+
+    fn loading() -> Self {
+        Self {
+            sidebar: Sidebar::new(),
+            threads: Vec::new(),
+            navigator: Navigator::new(Vec::new()),
+            buffer: CommentBuffer::new(Vec::new()),
+            collapsed: HashSet::new(),
+            is_loading: true,
+            async_handle: None,
+            current_pr: None,
+            pr_chain: None,
+        }
+    }
+
+    fn set_threads(&mut self, threads: Vec<CommentThread>, chain: Option<&PrChain>) {
+        self.threads = threads.clone();
+        let mut buffer = CommentBuffer::new(threads.clone());
+        buffer.set_chain(chain.cloned());
+        buffer.initialize_collapsed();
+        self.buffer = buffer;
+        self.navigator = Navigator::new(threads);
+        self.is_loading = false;
     }
 }
 
@@ -91,6 +145,30 @@ fn setup_keymaps(buf: &mut Buffer) -> Result<(), api::Error> {
         "<Cmd>lua require('neogh').focus_sidebar()<CR>",
         &opts,
     )?;
+    buf.set_keymap(
+        Mode::Normal,
+        "za",
+        "<Cmd>lua require('neogh').toggle_collapse()<CR>",
+        &opts,
+    )?;
+    buf.set_keymap(
+        Mode::Normal,
+        "r",
+        "<Cmd>lua require('neogh').toggle_resolve()<CR>",
+        &opts,
+    )?;
+    buf.set_keymap(
+        Mode::Normal,
+        "[p",
+        "<Cmd>lua require('neogh').navigate_to_parent_pr()<CR>",
+        &opts,
+    )?;
+    buf.set_keymap(
+        Mode::Normal,
+        "]p",
+        "<Cmd>lua require('neogh').navigate_to_child_pr()<CR>",
+        &opts,
+    )?;
 
     Ok(())
 }
@@ -118,7 +196,7 @@ fn setup_autocmds(buf: &Buffer) -> Result<(), api::Error> {
                                 if sidebar_win == Window::current() {
                                     let cursor = sidebar_win.get_cursor()?;
                                     let line = cursor.0;
-                                    if let Some(idx) = state.buffer.line_to_comment_index(line) {
+                                    if let Some(idx) = state.buffer.line_to_thread_index(line) {
                                         state.navigator.set_index(idx);
                                     }
                                 }
@@ -142,12 +220,21 @@ fn setup_autocmds(buf: &Buffer) -> Result<(), api::Error> {
     Ok(())
 }
 
+fn render_loading_lines() -> Vec<String> {
+    let separator = "━".repeat(47);
+    vec![
+        separator.clone(),
+        "Loading PR comments...".to_string(),
+        "Fetching from GitHub...".to_string(),
+        separator,
+    ]
+}
+
 fn open() -> Result<(), String> {
     if let Err(e) = check_prerequisites() {
         notify_error(&e);
         return Err(e);
     }
-
 
     let token = get_gh_token().map_err(|e| match e {
         AuthError::GhNotFound => "gh CLI not found".to_string(),
@@ -155,38 +242,10 @@ fn open() -> Result<(), String> {
         AuthError::IoError(msg) => format!("IO error: {}", msg),
     })?;
 
-    notify_info("Fetching PR comments...");
+    let mut state = PluginState::loading();
 
-    let pr = detect_pr().map_err(|e| {
-        let msg = match e {
-            PrError::NotAGitRepo => "Not a git repository".to_string(),
-            PrError::GhError(err) => format!("gh error: {}", err),
-            PrError::NoAssociatedPr => "No PR associated with current branch".to_string(),
-            PrError::IoError(err) => format!("IO error: {}", err),
-            PrError::ParseError(err) => format!("Parse error: {}", err),
-        };
-        notify_error(&msg);
-        msg
-    })?;
-
-    let comments = fetch_comments(&token, &pr.owner, &pr.repo, pr.number).map_err(|e| {
-        let msg = format!("Failed to fetch comments: {}", e);
-        notify_error(&msg);
-        msg
-    })?;
-
-    // compute summary values before moving comments into the PluginState
-    let comment_count = comments.len();
-    let title = pr.title.clone();
-    let number = pr.number;
-
-    // build the state locally and perform all Neovim API calls while NOT holding the
-    // global STATE borrow (to avoid re-entrancy / RefCell borrow panics)
-    let mut state = PluginState::new(comments);
-
-    let lines = state.buffer.render();
-
-    state.sidebar.open(lines).map_err(|e| {
+    let loading_lines = render_loading_lines();
+    state.sidebar.open(loading_lines).map_err(|e| {
         let msg = format!("Failed to open sidebar: {}", e);
         notify_error(&msg);
         msg
@@ -200,25 +259,65 @@ fn open() -> Result<(), String> {
         setup_autocmds(buf).map_err(|e| format!("Failed to setup autocmds: {}", e))?;
     }
 
-    if !state.navigator.is_empty() {
-        state
-            .navigator
-            .set_cursor_to_current(&mut state.sidebar)
-            .map_err(|e| format!("Failed to set cursor: {}", e))?;
-    }
-
     state.sidebar.focus().map_err(|e| {
         let msg = format!("Failed to focus sidebar: {}", e);
         notify_error(&msg);
         msg
     })?;
 
-    notify_info(&format!(
-        "Loaded {} comments for PR #{}: {}",
-        comment_count, number, title
-    ));
+    let (sender, receiver) = channel::<FetchResult>();
+    let receiver = Arc::new(Mutex::new(receiver));
 
-    // now store the fully-initialized state into the thread-local storage
+    let receiver_clone = receiver.clone();
+    let handle = AsyncHandle::new(move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let result = receiver_clone.lock().unwrap().try_recv();
+            if let Ok(fetch_result) = result {
+                STATE.with(|state_cell| {
+                    if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+                        if let Some(ref mut state) = *state_opt {
+                            match fetch_result {
+                                FetchResult::Success {
+                                    threads,
+                                    title,
+                                    number,
+                                    current_pr,
+                                    pr_chain,
+                                } => {
+                                    state.set_threads(threads, pr_chain.as_ref());
+                                    state.current_pr = Some(current_pr);
+                                    state.pr_chain = pr_chain;
+
+                                    let lines = state.buffer.render();
+                                    if state.sidebar.set_lines(lines).is_ok() {
+                                        if !state.navigator.is_empty() {
+                                            if let Some(line) = state.buffer.line_for_thread(state.navigator.current_index()) {
+                                                let _ = state.sidebar.set_cursor(line + 1, 0);
+                                            }
+                                        }
+                                        notify_info(&format!(
+                                            "Loaded {} thread(s) for PR #{}: {}",
+                                            state.threads.len(),
+                                            number,
+                                            title
+                                        ));
+                                    }
+                                }
+                                FetchResult::Error(msg) => {
+                                    notify_error(&msg);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }));
+    })
+    .map_err(|e| format!("Failed to create async handle: {}", e))?;
+
+    let handle_clone = handle.clone();
+    state.async_handle = Some(handle);
+
     STATE.with(|state_cell| {
         let mut state_opt = match state_cell.try_borrow_mut() {
             Ok(guard) => guard,
@@ -227,6 +326,47 @@ fn open() -> Result<(), String> {
         *state_opt = Some(state);
         Ok(())
     })?;
+
+    std::thread::spawn(move || {
+        let pr_result = detect_pr();
+
+        let fetch_result = match pr_result {
+            Ok(pr) => {
+                let chain_result = detect_chain(&pr);
+                let pr_chain = match chain_result {
+                    Ok(chain) => Some(chain),
+                    Err(e) => {
+                        eprintln!("Failed to detect PR chain: {}", e);
+                        None
+                    }
+                };
+
+                match fetch_comments(&token, &pr.owner, &pr.repo, pr.number) {
+                    Ok(threads) => FetchResult::Success {
+                        threads,
+                        title: pr.title.clone(),
+                        number: pr.number,
+                        current_pr: pr,
+                        pr_chain,
+                    },
+                    Err(e) => FetchResult::Error(format!("Failed to fetch comments: {}", e)),
+                }
+            }
+            Err(e) => {
+                let msg = match e {
+                    PrError::NotAGitRepo => "Not a git repository".to_string(),
+                    PrError::GhError(err) => format!("gh error: {}", err),
+                    PrError::NoAssociatedPr => "No PR associated with current branch".to_string(),
+                    PrError::IoError(err) => format!("IO error: {}", err),
+                    PrError::ParseError(err) => format!("Parse error: {}", err),
+                };
+                FetchResult::Error(msg)
+            }
+        };
+
+        let _ = sender.send(fetch_result);
+        let _ = handle_clone.send();
+    });
 
     Ok(())
 }
@@ -275,16 +415,22 @@ fn next_comment() -> Result<(), String> {
             Err(_) => return Err("State temporarily unavailable".to_string()),
         };
         if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
             if state.navigator.is_empty() {
                 notify_info("No comments to navigate");
                 return Ok(());
             }
 
             state.navigator.next();
-            state
-                .navigator
-                .set_cursor_to_current(&mut state.sidebar)
-                .map_err(|e| format!("Failed to move cursor: {}", e))?;
+            if let Some(line) = state.buffer.line_for_thread(state.navigator.current_index()) {
+                state
+                    .sidebar
+                    .set_cursor(line + 1, 0)
+                    .map_err(|e| format!("Failed to move cursor: {}", e))?;
+            }
         } else {
             notify_error("Sidebar not open. Run :PRComments first");
             return Err("Sidebar not open".to_string());
@@ -300,16 +446,22 @@ fn prev_comment() -> Result<(), String> {
             Err(_) => return Err("State temporarily unavailable".to_string()),
         };
         if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
             if state.navigator.is_empty() {
                 notify_info("No comments to navigate");
                 return Ok(());
             }
 
             state.navigator.prev();
-            state
-                .navigator
-                .set_cursor_to_current(&mut state.sidebar)
-                .map_err(|e| format!("Failed to move cursor: {}", e))?;
+            if let Some(line) = state.buffer.line_for_thread(state.navigator.current_index()) {
+                state
+                    .sidebar
+                    .set_cursor(line + 1, 0)
+                    .map_err(|e| format!("Failed to move cursor: {}", e))?;
+            }
         } else {
             notify_error("Sidebar not open. Run :PRComments first");
             return Err("Sidebar not open".to_string());
@@ -350,6 +502,10 @@ fn jump_to_current() -> Result<(), String> {
             Err(_) => return Err("State temporarily unavailable".to_string()),
         };
         if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
             if state.navigator.is_empty() {
                 notify_info("No comments to jump to");
                 return Ok(());
@@ -388,6 +544,298 @@ fn jump_to_current() -> Result<(), String> {
                         notify_info("This is an issue comment with no file location");
                     }
                 }
+            }
+        } else {
+            notify_error("Sidebar not open. Run :PRComments first");
+            return Err("Sidebar not open".to_string());
+        }
+        Ok(())
+    })
+}
+
+fn toggle_collapse() -> Result<(), String> {
+    STATE.with(|state_cell| {
+        let mut state_opt = match state_cell.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err("State temporarily unavailable".to_string()),
+        };
+        if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
+            let current_idx = state.navigator.current_index();
+            state.buffer.toggle_collapse(current_idx);
+
+            let is_now_collapsed = state.buffer.is_collapsed(current_idx);
+            notify_info(&format!("Thread {} collapsed: {}", current_idx, is_now_collapsed));
+
+            let lines = state.buffer.render();
+            state
+                .sidebar
+                .set_lines(lines)
+                .map_err(|e| format!("Failed to update buffer: {}", e))?;
+
+            if let Some(line) = state.buffer.line_for_thread(current_idx) {
+                let _ = state.sidebar.set_cursor(line + 1, 0);
+            }
+        } else {
+            notify_error("Sidebar not open. Run :PRComments first");
+            return Err("Sidebar not open".to_string());
+        }
+        Ok(())
+    })
+}
+
+fn toggle_resolve() -> Result<(), String> {
+    STATE.with(|state_cell| {
+        let mut state_opt = match state_cell.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err("State temporarily unavailable".to_string()),
+        };
+        if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
+            let current_idx = state.navigator.current_index();
+
+            let thread = match state.threads.get(current_idx) {
+                Some(t) => t,
+                None => {
+                    notify_error("No thread selected");
+                    return Ok(());
+                }
+            };
+
+            let thread_id = match (&thread.root, &thread.thread_id) {
+                (Comment::Review(_), Some(id)) => id.clone(),
+                _ => {
+                    notify_info("Cannot resolve issue comments or threads without thread ID");
+                    return Ok(());
+                }
+            };
+
+            let token = get_gh_token().map_err(|e| format!("Auth error: {:?}", e))?;
+
+            let new_resolved = if thread.is_resolved {
+                unresolve_thread(&token, &thread_id)
+                    .map_err(|e| format!("Failed to unresolve: {:?}", e))?;
+                false
+            } else {
+                resolve_thread(&token, &thread_id)
+                    .map_err(|e| format!("Failed to resolve: {:?}", e))?;
+                true
+            };
+
+            state.buffer.set_thread_resolved(current_idx, new_resolved);
+            if let Some(t) = state.threads.get_mut(current_idx) {
+                t.is_resolved = new_resolved;
+            }
+
+            if new_resolved {
+                state.buffer.set_collapsed(current_idx, true);
+            }
+
+            let lines = state.buffer.render();
+            state
+                .sidebar
+                .set_lines(lines)
+                .map_err(|e| format!("Failed to update buffer: {}", e))?;
+
+            notify_info(if new_resolved {
+                "Thread resolved"
+            } else {
+                "Thread unresolved"
+            });
+        } else {
+            notify_error("Sidebar not open. Run :PRComments first");
+            return Err("Sidebar not open".to_string());
+        }
+        Ok(())
+    })
+}
+
+enum ChainFetchResult {
+    Success {
+        threads: Vec<CommentThread>,
+        title: String,
+        number: u64,
+        new_index: usize,
+    },
+    Error(String),
+}
+
+fn fetch_pr_comments_for_chain(pr_info: &crate::github::pr::PrInfo, owner: &str, repo: &str, new_index: usize) {
+    let token = match get_gh_token() {
+        Ok(t) => t,
+        Err(e) => {
+            notify_error(&format!("Auth error: {:?}", e));
+            return;
+        }
+    };
+
+    STATE.with(|state_cell| {
+        if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+            if let Some(ref mut state) = *state_opt {
+                state.is_loading = true;
+                let loading_lines = render_loading_lines();
+                let _ = state.sidebar.set_lines(loading_lines);
+            }
+        }
+    });
+
+    let (sender, receiver) = channel::<ChainFetchResult>();
+    let receiver = Arc::new(Mutex::new(receiver));
+
+    let receiver_clone = receiver.clone();
+    let handle_result = AsyncHandle::new(move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let result = receiver_clone.lock().unwrap().try_recv();
+            if let Ok(fetch_result) = result {
+                STATE.with(|state_cell| {
+                    if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+                        if let Some(ref mut state) = *state_opt {
+                            match fetch_result {
+                                ChainFetchResult::Success { threads, title, number, new_index } => {
+                                    let chain_clone = state.pr_chain.clone();
+                                    state.set_threads(threads, chain_clone.as_ref());
+                                    if let Some(ref mut chain) = state.pr_chain {
+                                        chain.current_index = new_index;
+                                    }
+                                    let lines = state.buffer.render();
+                                    if state.sidebar.set_lines(lines).is_ok() {
+                                        if !state.navigator.is_empty() {
+                                            if let Some(line) = state.buffer.line_for_thread(state.navigator.current_index()) {
+                                                let _ = state.sidebar.set_cursor(line + 1, 0);
+                                            }
+                                        }
+                                        notify_info(&format!("Loaded PR #{}: {}", number, title));
+                                    }
+                                }
+                                ChainFetchResult::Error(msg) => {
+                                    state.is_loading = false;
+                                    notify_error(&msg);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }));
+    });
+
+    if let Err(e) = handle_result {
+        notify_error(&format!("Failed to create async handle: {}", e));
+        return;
+    }
+
+    let handle = match handle_result {
+        Ok(h) => h,
+        Err(e) => {
+            notify_error(&format!("Failed to create async handle: {}", e));
+            return;
+        }
+    };
+
+    let handle_clone = handle.clone();
+    let owner = owner.to_string();
+    let repo = repo.to_string();
+    let pr_number = pr_info.number;
+    let title = pr_info.title.clone();
+
+    std::thread::spawn(move || {
+        let result = match fetch_comments(&token, &owner, &repo, pr_number) {
+            Ok(threads) => ChainFetchResult::Success {
+                threads,
+                title,
+                number: pr_number,
+                new_index,
+            },
+            Err(e) => ChainFetchResult::Error(format!("Failed to fetch comments: {}", e)),
+        };
+        let _ = sender.send(result);
+        let _ = handle_clone.send();
+    });
+
+    STATE.with(|state_cell| {
+        if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+            if let Some(ref mut state) = *state_opt {
+                state.async_handle = Some(handle);
+            }
+        }
+    });
+}
+
+fn navigate_to_parent_pr() -> Result<(), String> {
+    STATE.with(|state_cell| {
+        let mut state_opt = match state_cell.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err("State temporarily unavailable".to_string()),
+        };
+        if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
+            if let Some(ref chain) = state.pr_chain {
+                if chain.is_root() {
+                    notify_info("Already at the root PR (no parent)");
+                    return Ok(());
+                }
+                if let Some(parent_info) = chain.parent() {
+                    let parent_index = chain.current_index.saturating_sub(1);
+                    let parent_clone = parent_info.clone();
+                    drop(state_opt);
+                    if let Some(ref current_pr) = STATE.with(|sc| {
+                        sc.borrow().as_ref().map(|s| s.current_pr.clone())
+                    }).flatten() {
+                        fetch_pr_comments_for_chain(&parent_clone, &current_pr.owner, &current_pr.repo, parent_index);
+                    }
+                } else {
+                    notify_info("No parent PR found");
+                }
+            } else {
+                notify_info("No PR chain detected");
+            }
+        } else {
+            notify_error("Sidebar not open. Run :PRComments first");
+            return Err("Sidebar not open".to_string());
+        }
+        Ok(())
+    })
+}
+
+fn navigate_to_child_pr() -> Result<(), String> {
+    STATE.with(|state_cell| {
+        let mut state_opt = match state_cell.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err("State temporarily unavailable".to_string()),
+        };
+        if let Some(ref mut state) = *state_opt {
+            if state.is_loading {
+                notify_info("Still loading comments...");
+                return Ok(());
+            }
+            if let Some(ref chain) = state.pr_chain {
+                if chain.is_tip() {
+                    notify_info("Already at the tip PR (no child)");
+                    return Ok(());
+                }
+                if let Some(child_info) = chain.child() {
+                    let child_index = chain.current_index + 1;
+                    let child_clone = child_info.clone();
+                    drop(state_opt);
+                    if let Some(ref current_pr) = STATE.with(|sc| {
+                        sc.borrow().as_ref().map(|s| s.current_pr.clone())
+                    }).flatten() {
+                        fetch_pr_comments_for_chain(&child_clone, &current_pr.owner, &current_pr.repo, child_index);
+                    }
+                } else {
+                    notify_info("No child PR found");
+                }
+            } else {
+                notify_info("No PR chain detected");
             }
         } else {
             notify_error("Sidebar not open. Run :PRComments first");
@@ -472,6 +920,34 @@ fn neogh() -> nvim_oxi::Result<Dictionary> {
             }
         }));
     });
+    let toggle_collapse_fn: Function<(), ()> = Function::from_fn(|_| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = toggle_collapse() {
+                notify_error(&e);
+            }
+        }));
+    });
+    let toggle_resolve_fn: Function<(), ()> = Function::from_fn(|_| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = toggle_resolve() {
+                notify_error(&e);
+            }
+        }));
+    });
+    let navigate_to_parent_fn: Function<(), ()> = Function::from_fn(|_| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = navigate_to_parent_pr() {
+                notify_error(&e);
+            }
+        }));
+    });
+    let navigate_to_child_fn: Function<(), ()> = Function::from_fn(|_| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = navigate_to_child_pr() {
+                notify_error(&e);
+            }
+        }));
+    });
 
     Ok(Dictionary::from_iter([
         ("open", Object::from(open_fn)),
@@ -481,5 +957,9 @@ fn neogh() -> nvim_oxi::Result<Dictionary> {
         ("prev_comment", Object::from(prev_fn)),
         ("jump_to_current", Object::from(jump_fn)),
         ("focus_sidebar", Object::from(focus_fn)),
+        ("toggle_collapse", Object::from(toggle_collapse_fn)),
+        ("toggle_resolve", Object::from(toggle_resolve_fn)),
+        ("navigate_to_parent_pr", Object::from(navigate_to_parent_fn)),
+        ("navigate_to_child_pr", Object::from(navigate_to_child_fn)),
     ]))
 }
