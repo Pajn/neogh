@@ -1,6 +1,6 @@
 # neogh
 
-A Neovim plugin for viewing PR comments in a sidebar with easy navigation.
+A Neovim plugin for viewing PR comments in a sidebar with easy navigation and stacked PR support.
 
 ## Requirements
 
@@ -18,7 +18,6 @@ A Neovim plugin for viewing PR comments in a sidebar with easy navigation.
   build = "cargo build --release",
   config = function()
     -- Optional: set up keymaps
-    vim.keymap.set("n", "<leader>pc", function() require("neogh").open() end, { desc = "Open PR comments" })
     vim.keymap.set("n", "<leader>pc", function() require("neogh").toggle() end, { desc = "Toggle PR comments" })
   end,
 }
@@ -38,16 +37,34 @@ Active when sidebar is focused:
 |-----|--------|
 | `j` | Next comment |
 | `k` | Previous comment |
-| `q` | Close sidebar |
 | `<CR>` (Enter) | Jump to comment location in main window |
+| `za` | Toggle collapse/expand thread |
+| `r` | Toggle resolve/unresolve thread |
+| `R` | Refresh comments from GitHub |
+| `[p` | Navigate to parent PR in chain |
+| `]p` | Navigate to child PR in chain |
+| `q` | Close sidebar |
 
 ## Features
 
+### PR Comments
 - Auto-detects current PR from git branch
 - Shows both review comments (line-specific) and issue comments (general)
 - Auto-jump to file location when navigating between review comments
 - Relative timestamps (e.g., "2 hours ago")
-- Visual distinction between comment types
+- Thread grouping with expand/collapse
+- Resolve/unresolve threads directly from the sidebar
+
+### Stacked PR Support
+- Automatically detects PR chains (main ← A ← B ← C)
+- Navigate between PRs in the chain with `[p` and `]p`
+- Shows chain info in the sidebar header
+- Background prefetching for instant navigation between PRs in the chain
+
+### Performance
+- Single GraphQL query for all comment data
+- Background caching for PR chain navigation
+- Non-blocking async loading with instant sidebar open
 
 ## Building from Source
 

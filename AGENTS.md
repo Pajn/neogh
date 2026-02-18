@@ -10,7 +10,10 @@ High-level project summary
 - Plugin name: neogh — a Neovim PR comments sidebar plugin
 - Language: Rust
 - Entry point: src/lib.rs (exports commands :PRComments and :PRCommentsClose to Lua)
-- Key modules: src/github/* (gh CLI integration and comment fetching), src/ui/* (sidebar, buffer, navigation), src/types/* (shared comment types)
+- Key modules: 
+  - src/github/* (GraphQL API integration, PR detection, comment fetching, chain detection)
+  - src/ui/* (sidebar, buffer rendering, navigation)
+  - src/types/* (shared comment types)
 
 Agent Roles (summary)
 ---------------------
@@ -47,7 +50,7 @@ How these agents map to this repository
   - Produce: .opencode/todo.md (parallel groups: `github/`, `ui/`, `types+lib.rs`)
 
 - Worker groups (parallelizable)
-  - G1: github/ (auth.rs, pr.rs, comments.rs) — GH CLI integration and fetching
+  - G1: github/ (auth.rs, pr.rs, comments.rs, graphql.rs, chain.rs) — GraphQL integration and fetching
   - G2: ui/ (sidebar.rs, buffer.rs, navigation.rs) — Neovim UI + buffer rendering
   - G3: types/ + lib.rs — shared types, exports and lua binding glue
 
@@ -56,12 +59,12 @@ How these agents map to this repository
 Recommended commands and checks (for Workers & Reviewers)
 --------------------------------------------------------
 - Build: cargo build
-- Release build (produce compiled artifact): cargo build --release
+- Release build (produce compiled artifact): cargo build --release && cp target/release/libneogh.dylib lua/neogh.so
 - Type / static checks: cargo check
 - Tests: cargo test
 - Lint/format (optional): cargo clippy, cargo fmt -- --check
 - Inspect crate-type & FFI: check Cargo.toml for `crate-type = ["cdylib"|"dylib"]` and inspect target/ directory for produced artifacts to confirm expected lua/neogh.so
-- Runtime verification (manual): Open Neovim in the repository, ensure the compiled library is loadable (per project's README), and test :PRComments / :PRCommentsClose and navigation keys (j/k, <CR>, q)
+- Runtime verification (manual): Open Neovim in the repository, ensure the compiled library is loadable, and test all keymaps (j/k, <CR>, q, za, r, R, [p, ]p)
 
 Evidence required from Workers before Reviewer verification
 ---------------------------------------------------------
@@ -78,17 +81,6 @@ Reviewer verification checklist
 3. Follow Worker-provided runtime steps to reproduce the change in Neovim; confirm UI and CLI behaviors
 4. If everything passes, mark the leaf task as [x] in .opencode/todo.md and add integration notes to .opencode/integration-status.md
 5. If failures are observed, write precise sync issues to .opencode/sync-issues.md with exact file references and suggested fixes
-
-Delegation examples (Commander → Planner/Worker/Reviewer)
----------------------------------------------------------
-- Create a planning task (Planner):
-  delegate_task({ agent: "Planner", background: false, description: "Plan PR detection and GH integration", prompt: "Read plan.md and Cargo.toml; create .opencode/todo.md with tasks for implementing gh CLI auth, pr detection, and comments fetching. Include verification steps (cargo build, lsp diagnostics)" })
-
-- Assign Worker to implement PR detection (Worker):
-  delegate_task({ agent: "Worker", background: true, description: "Implement PR detection", prompt: "Edit src/github/pr.rs to run `gh pr view --json number,headRefName`, parse results, return structured PR info. Update .opencode/work-log.md at start and completion. Run cargo build and lsp_diagnostics and attach outputs." })
-
-- Request Reviewer verification after Worker finishes:
-  delegate_task({ agent: "Reviewer", background: false, description: "Verify PR detection implementation", prompt: "Run cargo build && cargo test; run lsp_diagnostics on src/github/pr.rs; attempt `gh pr view` in an example repo (or mock) and verify returned structure; update .opencode/sync-issues.md if any mismatch." })
 
 Parallelism guidance
 --------------------
@@ -118,19 +110,27 @@ Technical Discoveries
 - This includes `line_map` in `CommentBuffer` and all navigation calculations
 - **Rule**: Use 0-based indexing throughout; only convert to 1-based when displaying to user
 
-### Comment Height Calculation
-- The `render_comment_lines` function produces exactly `5 + body_lines` lines:
-  - separator (1) + header (1) + author (1) + sub_sep (1) + body[N] + separator (1)
-- The `CommentExt::height()` method must return this same value
-- **Critical**: Navigator and CommentBuffer must use the same height calculation for proper navigation sync
+### Navigation Sync with Chain Header
+- The chain header adds extra lines at the top of the buffer
+- `CommentBuffer::line_for_thread()` accounts for header offset
+- Navigator's internal line_map was ignoring this, causing cursor desync
+- **Fix**: Use `buffer.line_for_thread()` instead of Navigator's line_map for cursor positioning
 
-### GitHub API Integration
-- `gh pr view --json` does NOT include a `baseRepository` field
-- Owner/repo must be extracted from the PR URL instead
-- PR comments are stored on the base repo, not the fork's `headRepository`
-- **Pagination**: Use `result.next.is_none()` to check for more pages with octocrab
-- **Review Comments**: Include ALL review comments, not just those with `pull_request_review_id`
-- **Null Lines**: Use `original_line` as fallback when `line` is null in review comments
+### GitHub GraphQL API
+- All comment fetching uses a single GraphQL query for performance
+- GraphQL returns camelCase field names; use `#[serde(rename = "camelCaseName")]`
+- Review threads include `isResolved` status and all nested comments
+- PR chain detection uses separate GraphQL queries for parent/child PRs
+
+### Async State Management
+- `AsyncHandle` is used to communicate between background threads and main Neovim thread
+- nvim-oxi APIs cannot be called from spawned threads - Lua state is thread-local
+- Background threads send results through channels, then call `handle.send()`
+- The callback on main thread reads channel and updates UI
+
+### Buffer Non-modifiable
+- Sidebar buffer should be `modifiable=false` to prevent accidental edits
+- `set_lines()` must temporarily toggle `modifiable=true` during updates
 
 Concluding notes
 ----------------

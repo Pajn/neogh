@@ -1,3 +1,4 @@
+use crate::github::workflow::{CheckConclusion, CheckRun, CheckStatus, CheckSuite};
 use crate::types::{Comment, CommentThread, IssueComment, ReviewComment, User};
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
@@ -437,6 +438,197 @@ pub fn fetch_pr_comments(
             threads.sort_by_key(|t| *t.created_at());
 
             Ok(threads)
+        })
+    })
+}
+
+// === Check Runs / Workflow Status ===
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsResponse {
+    data: CheckRunsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsData {
+    repository: CheckRunsRepository,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: CheckRunsPullRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsPullRequest {
+    commits: CommitConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitConnection {
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitNode {
+    commit: CommitInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitInfo {
+    #[serde(rename = "checkSuites")]
+    check_suites: Option<CheckSuiteConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckSuiteConnection {
+    nodes: Vec<CheckSuiteNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckSuiteNode {
+    app: Option<AppInfo>,
+    status: String,
+    conclusion: Option<String>,
+    #[serde(rename = "checkRuns")]
+    check_runs: Option<CheckRunConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppInfo {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunConnection {
+    nodes: Vec<CheckRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunNode {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    #[serde(rename = "startedAt")]
+    started_at: Option<String>,
+    #[serde(rename = "completedAt")]
+    completed_at: Option<String>,
+    #[serde(rename = "detailsUrl")]
+    details_url: Option<String>,
+}
+
+/// Fetch check suites and check runs for a PR's latest commit
+pub fn fetch_check_runs(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Result<Vec<CheckSuite>, GraphQLError> {
+    tokio::task::block_in_place(|| {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| GraphQLError::RequestFailed(e.to_string()))?;
+
+        rt.block_on(async {
+            let octocrab = Octocrab::builder()
+                .personal_token(token.to_string())
+                .build()
+                .map_err(|e| GraphQLError::RequestFailed(e.to_string()))?;
+
+            let query = r#"
+                query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $number) {
+                            commits(last: 1) {
+                                nodes {
+                                    commit {
+                                        checkSuites(first: 20) {
+                                            nodes {
+                                                app { name }
+                                                status
+                                                conclusion
+                                                checkRuns(first: 50) {
+                                                    nodes {
+                                                        name
+                                                        status
+                                                        conclusion
+                                                        startedAt
+                                                        completedAt
+                                                        detailsUrl
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            "#;
+
+            let variables = serde_json::json!({
+                "query": query,
+                "variables": {
+                    "owner": owner,
+                    "repo": repo,
+                    "number": pr_number as i32
+                }
+            });
+
+            // First get raw response to debug errors
+            let raw_response: serde_json::Value = octocrab
+                .graphql(&variables)
+                .await
+                .map_err(|e| GraphQLError::RequestFailed(e.to_string()))?;
+            
+            // Check for GraphQL errors
+            if let Some(errors) = raw_response.get("errors") {
+                let error_msg = errors.to_string();
+                eprintln!("GraphQL errors: {}", error_msg);
+                return Err(GraphQLError::RequestFailed(format!("GraphQL error: {}", error_msg)));
+            }
+
+            let response: CheckRunsResponse = serde_json::from_value(raw_response)
+                .map_err(|e| GraphQLError::RequestFailed(format!("Parse error: {}", e)))?;
+
+            let mut suites = Vec::new();
+
+            for commit_node in response.data.repository.pull_request.commits.nodes {
+                if let Some(check_suites) = commit_node.commit.check_suites {
+                    for suite_node in check_suites.nodes {
+                        let app_name = suite_node.app.map(|a| a.name).unwrap_or_else(|| "Unknown".to_string());
+                        let status = CheckStatus::from_str(&suite_node.status);
+                        let conclusion = suite_node.conclusion.map(|c| CheckConclusion::from_str(&c));
+
+                        let mut check_runs = Vec::new();
+                        if let Some(cr_conn) = suite_node.check_runs {
+                            for cr_node in cr_conn.nodes {
+                                let started_at = cr_node.started_at.and_then(|s| s.parse().ok());
+                                let completed_at = cr_node.completed_at.and_then(|s| s.parse().ok());
+
+                                check_runs.push(CheckRun {
+                                    name: cr_node.name,
+                                    status: CheckStatus::from_str(&cr_node.status),
+                                    conclusion: cr_node.conclusion.map(|c| CheckConclusion::from_str(&c)),
+                                    started_at,
+                                    completed_at,
+                                    details_url: cr_node.details_url,
+                                });
+                            }
+                        }
+
+                        suites.push(CheckSuite {
+                            app_name,
+                            status,
+                            conclusion,
+                            check_runs,
+                        });
+                    }
+                }
+            }
+
+            Ok(suites)
         })
     })
 }
