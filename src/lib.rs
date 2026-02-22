@@ -3,7 +3,7 @@ mod github;
 mod types;
 mod ui;
 
-use crate::actions::{ActionsFetchResult, ActionsNavigator};
+use crate::actions::{ActionsFetchResult, ActionsNavigator, WorkflowPrefetchResult};
 use crate::github::{
     detect_chain, detect_pr, fetch_check_runs, fetch_comments, get_gh_token, is_gh_installed,
     resolve_thread, unresolve_thread, AuthError, CheckSuite, PrError,
@@ -457,7 +457,7 @@ fn spawn_actions_fetch(mut state: PluginState, token: String) -> Result<(), Stri
                                 ActionsFetchResult::Success { suites, number, current_pr, pr_chain } => {
                                     state.pr_workflow_cache.insert(number, suites.clone());
                                     state.set_check_suites(suites, pr_chain.as_ref());
-                                    state.current_pr = Some(current_pr);
+                                    state.current_pr = Some(current_pr.clone());
                                     state.pr_chain = pr_chain.clone();
 
                                     let lines = state.actions_buffer.render();
@@ -468,6 +468,69 @@ fn spawn_actions_fetch(mut state: PluginState, token: String) -> Result<(), Stri
                                             }
                                         }
                                         notify_info(&format!("Loaded {} workflow suite(s) for PR #{}", state.check_suites.len(), number));
+                                    }
+
+                                    // Prefetch other PRs in chain
+                                    if let Some(ref chain) = pr_chain {
+                                        let other_prs: Vec<_> = chain.chain.iter()
+                                            .filter(|pr| pr.number != number)
+                                            .cloned()
+                                            .collect();
+                                        
+                                        let token = get_gh_token().ok();
+                                        if let Some(token) = token {
+                                            for pr_info in other_prs {
+                                                let pr_number = pr_info.number;
+                                                let owner = current_pr.owner.clone();
+                                                let repo = current_pr.repo.clone();
+                                                let token_clone = token.clone();
+
+                                                let (sender, receiver) = channel::<WorkflowPrefetchResult>();
+                                                let receiver = Arc::new(Mutex::new(receiver));
+                                                let receiver_clone = receiver.clone();
+
+                                                let prefetch_handle = AsyncHandle::new(move || {
+                                                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                                                        if let Ok(result) = receiver_clone.lock().unwrap().try_recv() {
+                                                            STATE.with(|state_cell| {
+                                                                if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+                                                                    if let Some(ref mut state) = *state_opt {
+                                                                        match result {
+                                                                            WorkflowPrefetchResult::Success { number, suites } => {
+                                                                                state.pr_workflow_cache.insert(number, suites);
+                                                                            }
+                                                                            WorkflowPrefetchResult::Error { number, msg } => {
+                                                                                eprintln!("Workflow prefetch failed for PR #{}: {}", number, msg);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                    }));
+                                                });
+
+                                                if let Ok(handle) = prefetch_handle {
+                                                    let handle_clone = handle.clone();
+                                                    STATE.with(|state_cell| {
+                                                        if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
+                                                            if let Some(ref mut state) = *state_opt {
+                                                                state.prefetch_handles.push(handle);
+                                                            }
+                                                        }
+                                                    });
+
+                                                    std::thread::spawn(move || {
+                                                        let result = match fetch_check_runs(&token_clone, &owner, &repo, pr_number) {
+                                                            Ok(suites) => WorkflowPrefetchResult::Success { number: pr_number, suites },
+                                                            Err(e) => WorkflowPrefetchResult::Error { number: pr_number, msg: e.to_string() },
+                                                        };
+                                                        let _ = sender.send(result);
+                                                        let _ = handle_clone.send();
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 ActionsFetchResult::Error(msg) => {

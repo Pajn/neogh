@@ -1,6 +1,6 @@
 # neogh
 
-A Neovim plugin for viewing PR comments in a sidebar with easy navigation and stacked PR support.
+A Neovim plugin for viewing PR comments and GitHub Actions workflow status in a sidebar with easy navigation and stacked PR support.
 
 ## Requirements
 
@@ -25,9 +25,19 @@ A Neovim plugin for viewing PR comments in a sidebar with easy navigation and st
 
 ## Usage
 
+### Commands
+
 - `:PRComments` or `require("neogh").open()` - Open the PR comments sidebar
+- `:PRActions` - Open the workflow status sidebar
 - `:PRCommentsClose` or `require("neogh").close()` - Close the sidebar
 - `require("neogh").toggle()` - Toggle the sidebar
+
+### Modes
+
+The sidebar has two modes:
+
+1. **Comments Mode** - View PR review comments and issue comments
+2. **Actions Mode** - View GitHub Actions workflow status and check runs
 
 ## Sidebar Keymaps
 
@@ -35,12 +45,13 @@ Active when sidebar is focused:
 
 | Key | Action |
 |-----|--------|
-| `j` | Next comment |
-| `k` | Previous comment |
-| `<CR>` (Enter) | Jump to comment location in main window |
-| `za` | Toggle collapse/expand thread |
-| `r` | Toggle resolve/unresolve thread |
-| `R` | Refresh comments from GitHub |
+| `j` | Next item (comment/workflow) |
+| `k` | Previous item (comment/workflow) |
+| `<CR>` (Enter) | Comments: jump to file location. Actions: open workflow in browser |
+| `<Tab>` | Switch between Comments and Actions mode |
+| `za` | Toggle collapse/expand thread (Comments only) |
+| `r` | Toggle resolve/unresolve thread (Comments only) |
+| `R` | Refresh from GitHub |
 | `[p` | Navigate to parent PR in chain |
 | `]p` | Navigate to child PR in chain |
 | `q` | Close sidebar |
@@ -55,14 +66,21 @@ Active when sidebar is focused:
 - Thread grouping with expand/collapse
 - Resolve/unresolve threads directly from the sidebar
 
+### GitHub Actions Status
+- View check suites and individual check runs for the PR's latest commit
+- Status icons: ✅ Success, ❌ Failure, 🔄 Running, ⏳ Pending
+- Open workflow details in browser with `<CR>`
+- See which jobs passed/failed at a glance
+
 ### Stacked PR Support
 - Automatically detects PR chains (main ← A ← B ← C)
 - Navigate between PRs in the chain with `[p` and `]p`
 - Shows chain info in the sidebar header
 - Background prefetching for instant navigation between PRs in the chain
+- Works in both Comments and Actions modes
 
 ### Performance
-- Single GraphQL query for all comment data
+- Single GraphQL query for all comment/workflow data
 - Background caching for PR chain navigation
 - Non-blocking async loading with instant sidebar open
 

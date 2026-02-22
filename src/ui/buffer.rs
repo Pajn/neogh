@@ -197,6 +197,48 @@ impl CommentBuffer {
         Self::render_comment_lines_with_prefix(comment, "└─", false)
     }
 
+    fn render_collapsed_thread(thread: &CommentThread, reply_count: usize) -> Vec<String> {
+        let separator = "━".repeat(47);
+        let mut lines = Vec::new();
+
+        let status = if thread.is_resolved {
+            " ✓ [resolved]"
+        } else {
+            ""
+        };
+        let reply_info = if reply_count > 0 {
+            format!(
+                " ({} repl{})",
+                reply_count,
+                if reply_count == 1 { "y" } else { "ies" }
+            )
+        } else {
+            String::new()
+        };
+
+        let header = match &thread.root {
+            Comment::Review(rc) => {
+                if let Some(line_num) = rc.navigation_line() {
+                    format!(
+                        "📝 {}:{}{}{} [collapsed]",
+                        rc.path, line_num, status, reply_info
+                    )
+                } else {
+                    format!("📝 {}{}{} [collapsed]", rc.path, status, reply_info)
+                }
+            }
+            Comment::Issue(_) => format!("💬 Issue Comment{}{} [collapsed]", status, reply_info),
+        };
+
+        let time_str = Self::format_relative_time(thread.root.created_at());
+        lines.push(separator.clone());
+        lines.push(format!("{} • {}", thread.root.author(), time_str));
+        lines.push(header);
+        lines.push(separator);
+
+        lines
+    }
+
     fn render_chain_header(&self) -> Vec<String> {
         let separator = "━".repeat(47);
         let mut lines = Vec::new();
@@ -255,16 +297,25 @@ impl CommentBuffer {
         for (index, thread) in self.threads.iter().enumerate() {
             let is_collapsed = self.collapsed.contains(&index);
 
-            let root_lines = Self::render_comment_lines(&thread.root, thread.is_resolved);
-            let start_line = current_line;
-            let end_line = start_line + root_lines.len();
+            if is_collapsed {
+                let collapsed_lines = Self::render_collapsed_thread(thread, thread.replies.len());
+                let start_line = current_line;
+                let end_line = start_line + collapsed_lines.len();
 
-            self.line_map.push((start_line, end_line, index, false));
+                self.line_map.push((start_line, end_line, index, false));
 
-            all_lines.extend(root_lines);
-            current_line = end_line;
+                all_lines.extend(collapsed_lines);
+                current_line = end_line;
+            } else {
+                let root_lines = Self::render_comment_lines(&thread.root, thread.is_resolved);
+                let start_line = current_line;
+                let end_line = start_line + root_lines.len();
 
-            if !is_collapsed {
+                self.line_map.push((start_line, end_line, index, false));
+
+                all_lines.extend(root_lines);
+                current_line = end_line;
+
                 for _reply in &thread.replies {
                     let reply_lines = Self::render_reply_lines(_reply);
                     let reply_start = current_line;

@@ -1,7 +1,7 @@
 //! Actions mode specific logic
 
-use crate::github::{detect_chain, fetch_check_runs, get_gh_token, CheckSuite};
 use crate::github::pr::{PrChain, PullRequest};
+use crate::github::{detect_chain, fetch_check_runs, get_gh_token, CheckSuite};
 use crate::types::SidebarMode;
 use crate::ui::ActionsBuffer;
 use nvim_oxi::api::{self, opts::*, types::*};
@@ -69,4 +69,15 @@ pub enum ChainActionsFetchResult {
         new_index: usize,
     },
     Error(String),
+}
+
+pub enum WorkflowPrefetchResult {
+    Success {
+        number: u64,
+        suites: Vec<CheckSuite>,
+    },
+    Error {
+        number: u64,
+        msg: String,
+    },
 }

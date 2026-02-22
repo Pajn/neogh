@@ -7,13 +7,14 @@ This document defines the agent roles, responsibilities, and workflows to be use
 
 High-level project summary
 --------------------------
-- Plugin name: neogh — a Neovim PR comments sidebar plugin
+- Plugin name: neogh — a Neovim PR comments and workflow status sidebar plugin
 - Language: Rust
-- Entry point: src/lib.rs (exports commands :PRComments and :PRCommentsClose to Lua)
+- Entry point: src/lib.rs (exports commands :PRComments, :PRActions, :PRCommentsClose to Lua)
 - Key modules: 
-  - src/github/* (GraphQL API integration, PR detection, comment fetching, chain detection)
-  - src/ui/* (sidebar, buffer rendering, navigation)
-  - src/types/* (shared comment types)
+  - src/github/* (GraphQL API integration, PR detection, comment fetching, chain detection, workflow status)
+  - src/ui/* (sidebar, buffer rendering, navigation, actions buffer)
+  - src/types/* (shared comment types, sidebar mode)
+  - src/actions.rs (actions mode navigation and types)
 
 Agent Roles (summary)
 ---------------------
@@ -46,13 +47,13 @@ Agent Roles (summary)
 How these agents map to this repository
 --------------------------------------
 - Planner -> discovery + task decomposition
-  - Read: plan.md, Cargo.toml, src/lib.rs, src/github/*, src/ui/*, lua/
-  - Produce: .opencode/todo.md (parallel groups: `github/`, `ui/`, `types+lib.rs`)
+  - Read: plan.md, Cargo.toml, src/lib.rs, src/github/*, src/ui/*, src/actions.rs, lua/
+  - Produce: .opencode/todo.md (parallel groups: `github/`, `ui/`, `types+lib.rs`, `actions.rs`)
 
 - Worker groups (parallelizable)
-  - G1: github/ (auth.rs, pr.rs, comments.rs, graphql.rs, chain.rs) — GraphQL integration and fetching
-  - G2: ui/ (sidebar.rs, buffer.rs, navigation.rs) — Neovim UI + buffer rendering
-  - G3: types/ + lib.rs — shared types, exports and lua binding glue
+  - G1: github/ (auth.rs, pr.rs, comments.rs, graphql.rs, chain.rs, workflow.rs) — GraphQL integration and fetching
+  - G2: ui/ (sidebar.rs, buffer.rs, navigation.rs, actions_buffer.rs) — Neovim UI + buffer rendering
+  - G3: types/ + lib.rs + actions.rs — shared types, exports and lua binding glue
 
 - Reviewer -> Verify build, diagnostics, and runtime behavior after Workers finish each leaf task
 
@@ -64,7 +65,7 @@ Recommended commands and checks (for Workers & Reviewers)
 - Tests: cargo test
 - Lint/format (optional): cargo clippy, cargo fmt -- --check
 - Inspect crate-type & FFI: check Cargo.toml for `crate-type = ["cdylib"|"dylib"]` and inspect target/ directory for produced artifacts to confirm expected lua/neogh.so
-- Runtime verification (manual): Open Neovim in the repository, ensure the compiled library is loadable, and test all keymaps (j/k, <CR>, q, za, r, R, [p, ]p)
+- Runtime verification (manual): Open Neovim in the repository, ensure the compiled library is loadable, and test all keymaps (j/k, <CR>, q, za, r, R, [p, ]p, <Tab>)
 
 Evidence required from Workers before Reviewer verification
 ---------------------------------------------------------
@@ -84,7 +85,7 @@ Reviewer verification checklist
 
 Parallelism guidance
 --------------------
-- Independent groups (github/, ui/, types/lib) can be worked on concurrently.
+- Independent groups (github/, ui/, types/lib, actions.rs) can be worked on concurrently.
 - When a Worker changes public types (src/types/*) or lib.rs exports, notify dependent Workers and Reviewer because these are integration boundary changes.
 
 Safety & commit rules
@@ -107,17 +108,18 @@ Technical Discoveries
 ### Line Number Indexing
 - Neovim's `get_cursor()` returns 0-based line numbers
 - All line indexing in the codebase must be 0-based for consistency
-- This includes `line_map` in `CommentBuffer` and all navigation calculations
+- This includes `line_map` in `CommentBuffer` and `ActionsBuffer` and all navigation calculations
 - **Rule**: Use 0-based indexing throughout; only convert to 1-based when displaying to user
 
 ### Navigation Sync with Chain Header
 - The chain header adds extra lines at the top of the buffer
-- `CommentBuffer::line_for_thread()` accounts for header offset
+- `CommentBuffer::line_for_thread()` and `ActionsBuffer::line_for_suite()` account for header offset
 - Navigator's internal line_map was ignoring this, causing cursor desync
-- **Fix**: Use `buffer.line_for_thread()` instead of Navigator's line_map for cursor positioning
+- **Fix**: Use `buffer.line_for_thread()` / `buffer.line_for_suite()` instead of Navigator's line_map for cursor positioning
 
 ### GitHub GraphQL API
 - All comment fetching uses a single GraphQL query for performance
+- Workflow status uses a separate GraphQL query for check suites/runs
 - GraphQL returns camelCase field names; use `#[serde(rename = "camelCaseName")]`
 - Review threads include `isResolved` status and all nested comments
 - PR chain detection uses separate GraphQL queries for parent/child PRs
@@ -131,6 +133,17 @@ Technical Discoveries
 ### Buffer Non-modifiable
 - Sidebar buffer should be `modifiable=false` to prevent accidental edits
 - `set_lines()` must temporarily toggle `modifiable=true` during updates
+
+### Sidebar Modes
+- The plugin supports two modes: Comments and Actions
+- `SidebarMode` enum in `src/types/mode.rs` tracks current mode
+- Both modes share the same keymaps but have different behaviors
+- PR chain navigation works in both modes, fetching appropriate data
+
+### View Centering on Navigation
+- Use `normal! zz` after setting cursor to center the view
+- This ensures long comment threads and workflow suites with many jobs are fully visible
+- Applied in both `next_comment()`, `prev_comment()`, and `switch_mode()` functions
 
 Concluding notes
 ----------------
