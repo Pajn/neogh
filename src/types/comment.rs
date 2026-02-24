@@ -5,6 +5,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReviewComment {
     pub id: u64,
+    pub node_id: Option<String>,
     pub path: String,
     pub line: Option<u32>,
     pub original_line: Option<u32>,

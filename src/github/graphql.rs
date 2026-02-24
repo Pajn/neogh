@@ -386,6 +386,7 @@ pub fn fetch_pr_comments(
                             .unwrap_or_else(|_| Utc::now());
                         ReviewComment {
                             id: c.database_id as u64,
+                            node_id: None,
                             path: c.path.or(thread_node.path.clone()).unwrap_or_default(),
                             line: c.line.map(|l| l as u32),
                             original_line: c.original_line.map(|l| l as u32),

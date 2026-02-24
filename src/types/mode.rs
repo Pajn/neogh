@@ -4,6 +4,7 @@ pub enum SidebarMode {
     #[default]
     Comments,
     Actions,
+    PendingReview,
 }
 
 impl SidebarMode {
@@ -11,6 +12,7 @@ impl SidebarMode {
         match self {
             SidebarMode::Comments => SidebarMode::Actions,
             SidebarMode::Actions => SidebarMode::Comments,
+            SidebarMode::PendingReview => SidebarMode::PendingReview,
         }
     }
 
@@ -18,6 +20,7 @@ impl SidebarMode {
         match self {
             SidebarMode::Comments => "Comments",
             SidebarMode::Actions => "Actions",
+            SidebarMode::PendingReview => "Pending Review",
         }
     }
 }
