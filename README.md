@@ -19,9 +19,26 @@ A Neovim plugin for viewing PR comments and GitHub Actions workflow status in a 
 {
   "Pajn/neogh",
   build = "./scripts/install.sh", -- Or "powershell ./scripts/install.ps1" on Windows
+  cmd = {
+    "PRComments",
+    "PRActions",
+    "PRCommentsClose",
+    "PRReview",
+    "PRReviewSignsLoad",
+    "PRReviewComment",
+    "PRReviewApprove",
+    "PRReviewRequestChanges",
+    "PRReviewFinishComment",
+    "PRReplyThread",
+    "PRPendingComments",
+    "PRCommentEdit",
+    "PRCommentDelete",
+  },
+  keys = {
+    { "<leader>pc", function() require("neogh").toggle() end, desc = "Toggle PR comments" },
+  },
   config = function()
-    -- Optional: set up keymaps
-    vim.keymap.set("n", "<leader>pc", function() require("neogh").toggle() end, { desc = "Toggle PR comments" })
+    require("neogh")
   end,
 }
 ```
@@ -32,9 +49,7 @@ A Neovim plugin for viewing PR comments and GitHub Actions workflow status in a 
 {
   "Pajn/neogh",
   build = "cargo build --release && cp target/release/libneogh.* lua/neogh.so",
-  config = function()
-    -- ...
-  end,
+  -- ... same as above
 }
 ```
 
