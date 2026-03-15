@@ -5,9 +5,9 @@ mod ui;
 
 use crate::actions::{ActionsFetchResult, ActionsNavigator, WorkflowPrefetchResult};
 use crate::github::{
-    delete_pending_review_comment, detect_chain, detect_pr, edit_pending_review_comment,
-    fetch_check_runs, fetch_comments, fetch_pending_review_comments, get_gh_token, is_gh_installed,
-    resolve_thread, unresolve_thread, AuthError, CheckSuite, PrError,
+    delete_issue_comment, delete_pending_review_comment, detect_chain, detect_pr, edit_issue_comment,
+    edit_pending_review_comment, fetch_check_runs, fetch_comments, fetch_pending_review_comments,
+    get_gh_token, is_gh_installed, resolve_thread, unresolve_thread, AuthError, CheckSuite, PrError,
 };
 use crate::github::pr::{PrChain, PullRequest};
 use crate::types::{Comment, CommentExt, CommentThread, SidebarMode};
@@ -19,6 +19,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,13 @@ struct PendingEditSession {
     bufnr: Buffer,
     win: Window,
     comment_node_id: String,
+    kind: EditableCommentKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditableCommentKind {
+    Review,
+    Issue,
 }
 
 impl PluginState {
@@ -259,6 +267,23 @@ fn check_prerequisites() -> Result<(), String> {
         return Err("gh CLI not found. Please install: https://cli.github.com".to_string());
     }
     Ok(())
+}
+
+fn get_authenticated_login() -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(["api", "user", "--jq", ".login"])
+        .output()
+        .map_err(|e| format!("Failed to run gh api user: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if login.is_empty() {
+        return Err("Failed to determine authenticated GitHub login".to_string());
+    }
+    Ok(login)
 }
 
 fn setup_keymaps(buf: &mut Buffer) -> Result<(), api::Error> {
@@ -636,9 +661,8 @@ fn edit_pending_comment() -> Result<(), String> {
             notify_info("Still loading...");
             return Ok(());
         }
-
-        if state.mode != SidebarMode::PendingReview {
-            notify_info("Edit pending comment only works in pending review sidebar");
+        if state.mode != SidebarMode::PendingReview && state.mode != SidebarMode::Comments {
+            notify_info("Edit comment works in Comments and Pending Review sidebars");
             return Ok(());
         }
 
@@ -646,19 +670,47 @@ fn edit_pending_comment() -> Result<(), String> {
         let thread = match state.threads.get(current_idx) {
             Some(t) => t,
             None => {
-                notify_error("No pending comment selected");
+                notify_error("No comment selected");
                 return Ok(());
             }
         };
 
-        let (comment_node_id, body) = match &thread.root {
-            Comment::Review(rc) => (
-                rc.node_id.clone().ok_or_else(|| "Pending comment node ID is missing".to_string())?,
-                rc.body.clone(),
-            ),
-            Comment::Issue(_) => {
-                notify_info("Selected item is not a review comment");
-                return Ok(());
+        let viewer_login = if state.mode == SidebarMode::Comments {
+            Some(get_authenticated_login()?)
+        } else {
+            None
+        };
+
+        let (comment_node_id, body, kind) = match &thread.root {
+            Comment::Review(rc) => {
+                if let Some(ref login) = viewer_login {
+                    if rc.user.login != *login {
+                        notify_info("You can only edit your own comments");
+                        return Ok(());
+                    }
+                }
+                (
+                    rc.node_id.clone().ok_or_else(|| "Review comment node ID is missing".to_string())?,
+                    rc.body.clone(),
+                    EditableCommentKind::Review,
+                )
+            }
+            Comment::Issue(ic) => {
+                if state.mode != SidebarMode::Comments {
+                    notify_info("Selected item is not editable in this mode");
+                    return Ok(());
+                }
+                if let Some(ref login) = viewer_login {
+                    if ic.user.login != *login {
+                        notify_info("You can only edit your own comments");
+                        return Ok(());
+                    }
+                }
+                (
+                    ic.node_id.clone().ok_or_else(|| "Issue comment node ID is missing".to_string())?,
+                    ic.body.clone(),
+                    EditableCommentKind::Issue,
+                )
             }
         };
 
@@ -739,9 +791,10 @@ fn edit_pending_comment() -> Result<(), String> {
             bufnr: buf,
             win,
             comment_node_id,
+            kind,
         });
 
-        notify_info("Edit pending comment and press <C-s> to save (q to cancel)");
+        notify_info("Edit comment and press <C-s> to save (q to cancel)");
         Ok(())
     })
 }
@@ -762,7 +815,7 @@ fn cancel_pending_comment_edit() -> Result<(), String> {
 }
 
 fn submit_pending_comment_edit() -> Result<(), String> {
-    let payload: Result<(String, String, Option<PullRequest>), String> =
+    let payload: Result<(String, EditableCommentKind, String, Option<PullRequest>, SidebarMode), String> =
         STATE.with(|state_cell| {
         let mut state_opt = match state_cell.try_borrow_mut() {
             Ok(guard) => guard,
@@ -789,19 +842,26 @@ fn submit_pending_comment_edit() -> Result<(), String> {
         }
 
         let current_pr = state.current_pr.clone();
+        let mode = state.mode;
 
         Ok((
             session.comment_node_id.clone(),
+            session.kind,
             body,
             current_pr,
+            mode,
         ))
     });
-    let (comment_node_id, body, current_pr) = payload?;
+    let (comment_node_id, kind, body, current_pr, mode) = payload?;
 
     let token = get_gh_token().map_err(|e| format!("Auth error: {:?}", e))?;
 
-    edit_pending_review_comment(&token, &comment_node_id, &body)
-        .map_err(|e| format!("Failed to edit pending comment: {}", e))?;
+    match kind {
+        EditableCommentKind::Review => edit_pending_review_comment(&token, &comment_node_id, &body)
+            .map_err(|e| format!("Failed to edit review comment: {}", e))?,
+        EditableCommentKind::Issue => edit_issue_comment(&token, &comment_node_id, &body)
+            .map_err(|e| format!("Failed to edit issue comment: {}", e))?,
+    }
 
     STATE.with(|state_cell| {
         if let Ok(mut state_opt) = state_cell.try_borrow_mut() {
@@ -811,9 +871,13 @@ fn submit_pending_comment_edit() -> Result<(), String> {
         }
     });
 
-    notify_info("Pending comment updated");
+    notify_info("Comment updated");
     if let Some(pr) = current_pr {
-        fetch_fresh_pending_comments(&pr);
+        if mode == SidebarMode::PendingReview {
+            fetch_fresh_pending_comments(&pr);
+        } else {
+            fetch_fresh_comments(&pr);
+        }
     }
     Ok(())
 }
@@ -837,9 +901,8 @@ fn delete_pending_comment() -> Result<(), String> {
             notify_info("Still loading...");
             return Ok(None);
         }
-
-        if state.mode != SidebarMode::PendingReview {
-            notify_info("Delete pending comment only works in pending review sidebar");
+        if state.mode != SidebarMode::PendingReview && state.mode != SidebarMode::Comments {
+            notify_info("Delete comment works in Comments and Pending Review sidebars");
             return Ok(None);
         }
 
@@ -847,14 +910,47 @@ fn delete_pending_comment() -> Result<(), String> {
         let thread = state
             .threads
             .get(current_idx)
-            .ok_or_else(|| "No pending comment selected".to_string())?;
+            .ok_or_else(|| "No comment selected".to_string())?;
 
-        let comment_id = match &thread.root {
-            Comment::Review(rc) => rc
-                .node_id
-                .clone()
-                .ok_or_else(|| "Pending comment node ID is missing".to_string())?,
-            Comment::Issue(_) => return Err("Selected item is not a review comment".to_string()),
+        let viewer_login = if state.mode == SidebarMode::Comments {
+            Some(get_authenticated_login()?)
+        } else {
+            None
+        };
+
+        let (comment_id, kind) = match &thread.root {
+            Comment::Review(rc) => {
+                if let Some(ref login) = viewer_login {
+                    if rc.user.login != *login {
+                        notify_info("You can only delete your own comments");
+                        return Ok(None);
+                    }
+                }
+                (
+                    rc.node_id
+                        .clone()
+                        .ok_or_else(|| "Review comment node ID is missing".to_string())?,
+                    EditableCommentKind::Review,
+                )
+            }
+            Comment::Issue(ic) => {
+                if state.mode != SidebarMode::Comments {
+                    notify_info("Selected item is not deletable in this mode");
+                    return Ok(None);
+                }
+                if let Some(ref login) = viewer_login {
+                    if ic.user.login != *login {
+                        notify_info("You can only delete your own comments");
+                        return Ok(None);
+                    }
+                }
+                (
+                    ic.node_id
+                        .clone()
+                        .ok_or_else(|| "Issue comment node ID is missing".to_string())?,
+                    EditableCommentKind::Issue,
+                )
+            }
         };
 
         let current_pr = state
@@ -864,20 +960,30 @@ fn delete_pending_comment() -> Result<(), String> {
 
         Ok(Some((
             comment_id,
+            kind,
+            state.mode,
             current_pr,
         )))
     })?;
 
-    let Some((comment_id, current_pr)) = maybe_payload else {
+    let Some((comment_id, kind, mode, current_pr)) = maybe_payload else {
         return Ok(());
     };
 
     let token = get_gh_token().map_err(|e| format!("Auth error: {:?}", e))?;
 
-    delete_pending_review_comment(&token, &comment_id)
-        .map_err(|e| format!("Failed to delete pending comment: {}", e))?;
-    notify_info("Pending comment deleted");
-    fetch_fresh_pending_comments(&current_pr);
+    match kind {
+        EditableCommentKind::Review => delete_pending_review_comment(&token, &comment_id)
+            .map_err(|e| format!("Failed to delete review comment: {}", e))?,
+        EditableCommentKind::Issue => delete_issue_comment(&token, &comment_id)
+            .map_err(|e| format!("Failed to delete issue comment: {}", e))?,
+    }
+    notify_info("Comment deleted");
+    if mode == SidebarMode::PendingReview {
+        fetch_fresh_pending_comments(&current_pr);
+    } else {
+        fetch_fresh_comments(&current_pr);
+    }
     Ok(())
 }
 
@@ -2632,7 +2738,7 @@ fn neogh() -> nvim_oxi::Result<Dictionary> {
     )?;
 
     let prpendingcommentedit_opts = CreateCommandOpts::builder()
-        .desc("Edit selected pending review comment")
+        .desc("Edit selected comment (pending review or comments sidebar)")
         .build();
     let prpendingcommentedit_cmd = |_args: CommandArgs| {
         let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -2646,9 +2752,21 @@ fn neogh() -> nvim_oxi::Result<Dictionary> {
         prpendingcommentedit_cmd,
         &prpendingcommentedit_opts,
     )?;
+    let prcommentedit_cmd = |_args: CommandArgs| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = edit_pending_comment() {
+                notify_error(&e);
+            }
+        }));
+    };
+    api::create_user_command(
+        "PRCommentEdit",
+        prcommentedit_cmd,
+        &prpendingcommentedit_opts,
+    )?;
 
     let prpendingcommentdelete_opts = CreateCommandOpts::builder()
-        .desc("Delete selected pending review comment")
+        .desc("Delete selected comment (pending review or comments sidebar)")
         .build();
     let prpendingcommentdelete_cmd = |_args: CommandArgs| {
         let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -2660,6 +2778,18 @@ fn neogh() -> nvim_oxi::Result<Dictionary> {
     api::create_user_command(
         "PRPendingCommentDelete",
         prpendingcommentdelete_cmd,
+        &prpendingcommentdelete_opts,
+    )?;
+    let prcommentdelete_cmd = |_args: CommandArgs| {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = delete_pending_comment() {
+                notify_error(&e);
+            }
+        }));
+    };
+    api::create_user_command(
+        "PRCommentDelete",
+        prcommentdelete_cmd,
         &prpendingcommentdelete_opts,
     )?;
 

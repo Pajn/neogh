@@ -10,7 +10,12 @@ local EVENT_LABELS = {
 
 local function notify(msg, level, opts)
   opts = opts or {}
-  vim.notify(msg, level or vim.log.levels.INFO, vim.tbl_extend("force", { title = "neogh" }, opts))
+  local merged_opts = vim.tbl_extend("force", { title = "neogh" }, opts)
+  local result = vim.notify(msg, level or vim.log.levels.INFO, merged_opts)
+  if result ~= nil then
+    return result
+  end
+  return merged_opts.id
 end
 
 local function trim(s)
@@ -303,27 +308,40 @@ function M.submit(bufnr)
     return
   end
 
-  local progress = notify(("Submitting %s review..."):format(session.label), vim.log.levels.INFO)
+  local progress_id = ("neogh-review-submit-%d"):format(bufnr)
+  local progress = notify(("Submitting %s review..."):format(session.label), vim.log.levels.INFO, {
+    id = progress_id,
+    timeout = 10000,
+  })
 
   get_current_pr_info(session.cwd, function(pr_info, pr_err)
     if pr_err then
-      notify(pr_err, vim.log.levels.ERROR, { replace = progress })
+      notify(pr_err, vim.log.levels.ERROR, { id = progress_id, replace = progress })
       return
     end
 
     ensure_pending_review(pr_info, function(review_ctx, review_err)
       if review_err then
-        notify("Failed to prepare pending review: " .. review_err, vim.log.levels.ERROR, { replace = progress })
+        notify("Failed to prepare pending review: " .. review_err, vim.log.levels.ERROR, {
+          id = progress_id,
+          replace = progress,
+        })
         return
       end
 
       submit_review(pr_info, review_ctx, session.event, body, function(submit_err)
         if submit_err then
-          notify("Failed to submit review: " .. submit_err, vim.log.levels.ERROR, { replace = progress })
+          notify("Failed to submit review: " .. submit_err, vim.log.levels.ERROR, {
+            id = progress_id,
+            replace = progress,
+          })
           return
         end
 
-        notify(("Review submitted: %s"):format(session.label), vim.log.levels.INFO, { replace = progress })
+        notify(("Review submitted: %s"):format(session.label), vim.log.levels.INFO, {
+          id = progress_id,
+          replace = progress,
+        })
         close_session_buffer(bufnr)
       end)
     end)

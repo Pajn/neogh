@@ -2,8 +2,14 @@ local M = {}
 
 local sessions = {}
 
-local function notify(msg, level)
-  vim.notify(msg, level or vim.log.levels.INFO, { title = "neogh" })
+local function notify(msg, level, opts)
+  opts = opts or {}
+  local merged_opts = vim.tbl_extend("force", { title = "neogh" }, opts)
+  local result = vim.notify(msg, level or vim.log.levels.INFO, merged_opts)
+  if result ~= nil then
+    return result
+  end
+  return merged_opts.id
 end
 
 local function trim(s)
@@ -512,7 +518,11 @@ function M.submit(bufnr)
 
   session.submitting = true
   local context = session.context
-  local progress = vim.notify("Submitting review comment...", vim.log.levels.INFO, { title = "neogh" })
+  local progress_id = ("neogh-review-comment-submit-%d"):format(bufnr)
+  local progress = notify("Submitting review comment...", vim.log.levels.INFO, {
+    id = progress_id,
+    timeout = 10000,
+  })
 
   get_current_pr_info(context.cwd, function(pr_info, pr_err)
     if pr_err then
@@ -520,7 +530,7 @@ function M.submit(bufnr)
       if s then
         s.submitting = false
       end
-      vim.notify(pr_err, vim.log.levels.ERROR, { title = "neogh", replace = progress })
+      notify(pr_err, vim.log.levels.ERROR, { id = progress_id, replace = progress })
       return
     end
 
@@ -530,8 +540,8 @@ function M.submit(bufnr)
         if s then
           s.submitting = false
         end
-        vim.notify("Failed to prepare pending review: " .. review_err, vim.log.levels.ERROR, {
-          title = "neogh",
+        notify("Failed to prepare pending review: " .. review_err, vim.log.levels.ERROR, {
+          id = progress_id,
           replace = progress,
         })
         return
@@ -543,15 +553,15 @@ function M.submit(bufnr)
           if s then
             s.submitting = false
           end
-          vim.notify("Failed to add review comment: " .. submit_err, vim.log.levels.ERROR, {
-            title = "neogh",
+          notify("Failed to add review comment: " .. submit_err, vim.log.levels.ERROR, {
+            id = progress_id,
             replace = progress,
           })
           return
         end
 
-        vim.notify("Review comment added to pending review", vim.log.levels.INFO, {
-          title = "neogh",
+        notify("Review comment added to pending review", vim.log.levels.INFO, {
+          id = progress_id,
           replace = progress,
         })
         mark_comment_range(context)

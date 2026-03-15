@@ -38,6 +38,8 @@ A Neovim plugin for viewing PR comments and GitHub Actions workflow status in a 
 - `:PRReviewFinishComment` or `require("neogh").review_finish_comment()` - Finish review as comment (with message split)
 - `:PRReplyThread` or `require("neogh").reply_to_thread()` - Reply to selected review thread in comments sidebar
 - `:PRPendingComments` or `require("neogh").open_pending_comments()` - Open sidebar with your pending review comments
+- `:PRCommentEdit` - Edit selected comment in sidebar (your own comments only)
+- `:PRCommentDelete` - Delete selected comment in sidebar (your own comments only)
 - `:PRCommentsClose` or `require("neogh").close()` - Close the sidebar
 - `require("neogh").toggle()` - Toggle the sidebar
 
@@ -96,12 +98,14 @@ Use one of:
 Each opens a small horizontal markdown split for your final message.
 Press `<C-s>` to submit the review event, or `q` to cancel.
 
-### Pending Review Comments Sidebar
+### Sidebar Comment Editing / Deletion
 
-Run `:PRPendingComments` to open a Rust-native sidebar listing your pending review comments on the current PR.
+In sidebars:
+- `:PRPendingComments`: you can edit/delete your pending review comments
+- `:PRComments`: you can edit/delete your own root comments in the selected thread
 
-- `e` opens a small markdown split to edit the selected pending comment (`<C-s>` save, `q` cancel)
-- `d` deletes the selected pending comment
+- `e` opens a small markdown split to edit the selected comment (`<C-s>` save, `q` cancel)
+- `d` deletes the selected comment
 
 ### Modes
 
@@ -123,8 +127,8 @@ Active when sidebar is focused:
 | `za` | Toggle collapse/expand thread (Comments only) |
 | `r` | Toggle resolve/unresolve thread (Comments only) |
 | `c` | Reply to selected review thread (Comments only) |
-| `e` | Edit selected pending review comment (Pending Review sidebar only) |
-| `d` | Delete selected pending review comment (Pending Review sidebar only) |
+| `e` | Edit selected comment (your own comments only) |
+| `d` | Delete selected comment (your own comments only) |
 | `R` | Refresh from GitHub |
 | `[p` | Navigate to parent PR in chain |
 | `]p` | Navigate to child PR in chain |

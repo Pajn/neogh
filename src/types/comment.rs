@@ -24,6 +24,7 @@ pub struct ReviewComment {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueComment {
     pub id: u64,
+    pub node_id: Option<String>,
     pub body: String,
     pub user: User,
     pub created_at: DateTime<Utc>,

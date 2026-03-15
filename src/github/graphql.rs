@@ -269,6 +269,7 @@ struct ThreadCommentsConnection {
 
 #[derive(Debug, Deserialize)]
 struct ThreadCommentNode {
+    id: String,
     #[serde(rename = "databaseId")]
     database_id: i64,
     body: String,
@@ -288,6 +289,7 @@ struct IssueCommentsConnection {
 
 #[derive(Debug, Deserialize)]
 struct IssueCommentNode {
+    id: String,
     #[serde(rename = "databaseId")]
     database_id: i64,
     body: String,
@@ -330,6 +332,7 @@ pub fn fetch_pr_comments(
                                     comments(first: 100) {
                                         nodes {
                                             databaseId
+                                            id
                                             body
                                             author { login }
                                             createdAt
@@ -343,6 +346,7 @@ pub fn fetch_pr_comments(
                             comments(first: 100) {
                                 nodes {
                                     databaseId
+                                    id
                                     body
                                     author { login }
                                     createdAt
@@ -386,7 +390,7 @@ pub fn fetch_pr_comments(
                             .unwrap_or_else(|_| Utc::now());
                         ReviewComment {
                             id: c.database_id as u64,
-                            node_id: None,
+                            node_id: Some(c.id),
                             path: c.path.or(thread_node.path.clone()).unwrap_or_default(),
                             line: c.line.map(|l| l as u32),
                             original_line: c.original_line.map(|l| l as u32),
@@ -426,6 +430,7 @@ pub fn fetch_pr_comments(
 
                 threads.push(CommentThread::single(Comment::Issue(IssueComment {
                     id: issue_comment.database_id as u64,
+                    node_id: Some(issue_comment.id),
                     body: issue_comment.body,
                     user: User {
                         login: issue_comment.author.map(|a| a.login).unwrap_or_else(|| "unknown".to_string()),

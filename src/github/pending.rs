@@ -314,3 +314,75 @@ pub fn edit_pending_review_comment(
         })
     })
 }
+
+pub fn delete_issue_comment(
+    token: &str,
+    comment_node_id: &str,
+) -> Result<(), PendingCommentsError> {
+    tokio::task::block_in_place(|| {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+
+        rt.block_on(async {
+            let octocrab = Octocrab::builder()
+                .personal_token(token.to_string())
+                .build()
+                .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+
+            let mutation = serde_json::json!({
+                "query": r#"
+                    mutation($id: ID!) {
+                        deleteIssueComment(input: { id: $id }) {
+                            clientMutationId
+                        }
+                    }
+                "#,
+                "variables": { "id": comment_node_id }
+            });
+
+            let _: serde_json::Value = octocrab
+                .graphql(&mutation)
+                .await
+                .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+            Ok(())
+        })
+    })
+}
+
+pub fn edit_issue_comment(
+    token: &str,
+    comment_node_id: &str,
+    body: &str,
+) -> Result<(), PendingCommentsError> {
+    tokio::task::block_in_place(|| {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+
+        rt.block_on(async {
+            let octocrab = Octocrab::builder()
+                .personal_token(token.to_string())
+                .build()
+                .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+
+            let mutation = serde_json::json!({
+                "query": r#"
+                    mutation($id: ID!, $body: String!) {
+                        updateIssueComment(input: { id: $id, body: $body }) {
+                            issueComment { id }
+                        }
+                    }
+                "#,
+                "variables": {
+                    "id": comment_node_id,
+                    "body": body
+                }
+            });
+
+            let _: serde_json::Value = octocrab
+                .graphql(&mutation)
+                .await
+                .map_err(|e| PendingCommentsError::RequestFailed(e.to_string()))?;
+            Ok(())
+        })
+    })
+}

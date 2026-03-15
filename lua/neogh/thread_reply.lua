@@ -4,7 +4,12 @@ local sessions = {}
 
 local function notify(msg, level, opts)
   opts = opts or {}
-  vim.notify(msg, level or vim.log.levels.INFO, vim.tbl_extend("force", { title = "neogh" }, opts))
+  local merged_opts = vim.tbl_extend("force", { title = "neogh" }, opts)
+  local result = vim.notify(msg, level or vim.log.levels.INFO, merged_opts)
+  if result ~= nil then
+    return result
+  end
+  return merged_opts.id
 end
 
 local function trim(s)
@@ -140,7 +145,11 @@ function M.submit(bufnr)
     return
   end
 
-  local progress = notify("Submitting thread reply...", vim.log.levels.INFO)
+  local progress_id = ("neogh-thread-reply-submit-%d"):format(bufnr)
+  local progress = notify("Submitting thread reply...", vim.log.levels.INFO, {
+    id = progress_id,
+    timeout = 10000,
+  })
   local mutation = [[
 mutation($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(
@@ -161,11 +170,14 @@ mutation($threadId: ID!, $body: String!) {
     body = body,
   }, session.cwd, function(_, err)
     if err then
-      notify("Failed to submit thread reply: " .. err, vim.log.levels.ERROR, { replace = progress })
+      notify("Failed to submit thread reply: " .. err, vim.log.levels.ERROR, {
+        id = progress_id,
+        replace = progress,
+      })
       return
     end
 
-    notify("Thread reply submitted", vim.log.levels.INFO, { replace = progress })
+    notify("Thread reply submitted", vim.log.levels.INFO, { id = progress_id, replace = progress })
     close_session_buffer(bufnr)
     refresh_sidebar()
   end)
