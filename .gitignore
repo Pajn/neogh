@@ -1,3 +1,4 @@
 /.opencode
 /target
 /lua/neogh.so
+/lua/neogh.dll

@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build - ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            extension: so
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            extension: dylib
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            extension: dylib
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cp target/${{ matrix.target }}/release/libneogh.so dist/neogh-${{ matrix.target }}.so
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cp target/${{ matrix.target }}/release/libneogh.dylib dist/neogh-${{ matrix.target }}.dylib
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp target/${{ matrix.target }}/release/neogh.dll dist/neogh-${{ matrix.target }}.dll
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: List binaries
+        run: ls -R dist
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          body: |
+            Pre-built binaries for neogh.
+            This release is automatically updated on every push to main.
+          prerelease: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

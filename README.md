@@ -13,13 +13,27 @@ A Neovim plugin for viewing PR comments and GitHub Actions workflow status in a 
 
 ### lazy.nvim
 
+#### Using prebuilt binaries (Recommended)
+
 ```lua
 {
   "Pajn/neogh",
-  build = "cargo build --release",
+  build = "./scripts/install.sh", -- Or "powershell ./scripts/install.ps1" on Windows
   config = function()
     -- Optional: set up keymaps
     vim.keymap.set("n", "<leader>pc", function() require("neogh").toggle() end, { desc = "Toggle PR comments" })
+  end,
+}
+```
+
+#### Building from source
+
+```lua
+{
+  "Pajn/neogh",
+  build = "cargo build --release && cp target/release/libneogh.* lua/neogh.so",
+  config = function()
+    -- ...
   end,
 }
 ```
@@ -170,4 +184,4 @@ Requires Rust toolchain.
 cargo build --release
 ```
 
-Copy `target/release/libneogh.dylib` (macOS) or `target/release/libneogh.so` (Linux) to `lua/neogh.so`.
+Copy `target/release/libneogh.dylib` (macOS), `target/release/libneogh.so` (Linux), or `target/release/neogh.dll` (Windows) to `lua/neogh.so` (or `lua/neogh.dll` on Windows).
